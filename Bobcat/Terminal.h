@@ -16,14 +16,17 @@ struct Terminal : TerminalCtrl {
 
     void        MouseEnter(Point pt, dword keyflags) override;
     void        MouseLeave() override;
+    void        MouseWheel(Point pt, int zdelta, dword keyflags) override;
     void        MouseMove(Point pt, dword keyflags) override;
     void        LeftDouble(Point pt, dword keyflags) override;
     Image       CursorImage(Point pt, dword keyflags) override;
     
-    bool        StartPty(const Profile& profile);
-    bool        Start(const String& profile_name);
-    bool        Start(const Profile& profile);
-    bool        Start(Terminal *term);
+    void        GotFocus() override;
+    
+    bool        StartPty(const Profile& profile, bool pane = false);
+    bool        Start(const String& profile_name, bool pane = false);
+    bool        Start(const Profile& profile, bool pane = false);
+    bool        Start(Terminal *term, bool pane = false);
     void        Stop();
     bool        Do();
     void        Restart();
@@ -34,6 +37,8 @@ struct Terminal : TerminalCtrl {
     bool        IsSuccess();
     bool        IsAsking();
     
+    bool        IsRoot();
+    
     void        DontExit();
     void        KeepAsking();
     void        ScheduleExit();
@@ -42,7 +47,7 @@ struct Terminal : TerminalCtrl {
     bool        ShouldAsk();
     bool        ShouldExit();
     bool        ShouldRestart();
- 
+
     void        AskRestartExit();
     
     hash_t      GetHashValue() const;
@@ -107,7 +112,12 @@ struct Terminal : TerminalCtrl {
     bool        OnAnnotation(Point pt, String& s);
     
     void        OnNotification(const String& text);
+    
+    void        OnProgress(int type, int data);
+    bool        InProgress() const;
 
+    bool        OnSelectorScan(dword key);
+    
     void        DragAndDrop(Point pt, PasteClip& d) override;
     
     Terminal&   PutText(const WString& txt);
@@ -120,19 +130,28 @@ struct Terminal : TerminalCtrl {
     int         GetMousePosAsIndex() const;
     
     void        OnHighlight(VectorMap<int, VTLine>& hl);
-
+    void        DoHighlight(const SortedIndex<ItemInfo>& items, HighlightInfo& hl, const Event<HighlightInfo&>& cb);
+    
+    WString     GetSelectedText() const;
+    
     bool        GetWordSelection(const Point& pt, Point& pl, Point& ph) const override;
     bool        GetWordSelectionByPattern(const Point& pt, Point& pl, Point& ph) const;
-     
+    
     void        EmulationMenu(Bar& menu);
     void        FileMenu(Bar& menu);
     void        EditMenu(Bar& menu);
     void        ViewMenu(Bar& menu);
     void        ContextMenu(Bar& menu);
+
+
+    Splitter*   GetParentSplitter() const;
+    bool        IsSplitterPane() const;
+    
+    Time        GetUpTime() const;
     
     int         GetExitCode()                   { return pty->GetExitCode();     }
     String      GetExitMessage()                { return pty->GetExitMessage();  }
- 
+
     enum class ExitMode {
         Keep,
         KeepAsking,
@@ -150,30 +169,34 @@ struct Terminal : TerminalCtrl {
     
     Bobcat&          ctx;
     One<APtyProcess> pty;
+    One<FrameTop<ProgressIndicator>> pi;
     bool         bell:1;
     bool         filter:1;
     bool         canresize:1;
     bool         smartwordsel:1;
     bool         shellintegration:1;
     bool         findselectedtext:1;
+    bool         warnonrootaccess:1;
     ExitMode     exitmode;
     String       profilename;
     String       workingdir;
     PathMode     pathmode;
+    Time         starttime;
     String       pathdelimiter;
     Value        data;
     Finder       finder;
     Linkifier    linkifier;
     QuickText    quicktext;
+    WebSearch    websearch;
     Color        highlight[4];
     TimeCallback timer;
-    
+
     struct TitleBar : FrameTB<Ctrl> {
         TitleBar(Terminal& ctx);
         void        SetData(const Value& v) override;
         Value       GetData() const override;
         void        FrameLayout(Rect& r) override;
- 
+
         void        Show();
         void        Hide();
         void        Menu();
@@ -186,6 +209,20 @@ struct Terminal : TerminalCtrl {
         StaticText  title;
         Value       data;
     }  titlebar;
+    
+    struct ProgressBar : FrameTB<ProgressIndicator> {
+        ProgressBar(Terminal& t);
+        void        SetData(const Value& v) override;
+        Value       GetData() const override;
+        void        FrameLayout(Rect& r) override;
+
+        void        Show(int percent);
+        void        Hide();
+
+        Terminal&    term;
+        Value        data;
+        TimeCallback timer;
+    } progressbar;
 };
 
 // Global functions
@@ -193,12 +230,36 @@ Terminal&                  AsTerminal(Ctrl& c);
 VectorMap<String, String>& GetWordSelectionPatterns();
 void                       InsertUnicodeCodePoint(Terminal& term);
 bool                       AnnotationEditor(String& s, const char *title);
+int                        AdjustLineOffset(Terminal& term, const Vector<int>& in, Vector<int>& out);
+
+// Global highlight callback
+void SetHighlightCallback(Terminal& t, VectorMap<int, VTLine>& line, const Vector<ItemInfo>& items,
+                                            const Event<VTCell&, const ItemInfo&, int>& cb);
 
 // Terminal specific notifications
-void AskRestartExitOK(Ptr<Terminal> t, const Profile& p);
-void AskRestartExitOK(Ptr<Terminal> t);
-void AskRestartExitError(Ptr<Terminal> t, const Profile& p);
-void AskRestartExitError(Ptr<Terminal> t);
+Ptr<MessageBox> AskRestartExitOK(Ptr<Terminal> t, const Profile& p);
+Ptr<MessageBox> AskRestartExitOK(Ptr<Terminal> t);
+Ptr<MessageBox> AskRestartExitError(Ptr<Terminal> t, const Profile& p);
+Ptr<MessageBox> AskRestartExitError(Ptr<Terminal> t);
+
+// Linux specific functions
+#ifdef PLATFORM_LINUX
+pid_t               GetProcessGroupId(APtyProcess& pty);
+Tuple<uid_t, uid_t> GetUserIdsFromProcess(pid_t pid);
+String              GetUsernameFromUserId(uid_t uid);
+String              GetRunningProcessName(APtyProcess& pty);
+
+class LinuxPtyProcess : public PosixPtyProcess {
+public:
+    bool            IsRoot();
+    bool            CheckPrivileges(Terminal& t);
+private:
+    uid_t euid   = 0;
+    uid_t ruid   = 0;
+    bool  isroot = false;
+    Ptr<MessageBox> notification;
+};
+#endif
 
 // Operators
 

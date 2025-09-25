@@ -48,14 +48,16 @@ public:
     void        Sync();
 
     void        Search();
-    void		SearchText(const WString& text);
+    void        SearchText(const WString& text);
+    void        CancelSearch();
+    bool        IsSearchCanceled() const;
     void        Update();
 
     void        SaveToFile();
     void        SaveToClipboard();
 
     bool        OnSearch(const VectorMap<int, WString>& m, const WString& s);
-    void        OnHighlight(VectorMap<int, VTLine>& hl);
+    void        OnHighlight(HighlightInfo& hl);
 
     struct Config {
         Config();
@@ -66,20 +68,15 @@ public:
         String  savemode;
         String  delimiter;
         bool    showall;
+        bool    parallelize;
         WithDeepCopy<Vector<String>> patterns;
     };
 
 private:
-    int         AdjustLineOffset(const Vector<int>& in, Vector<int>& out);
     bool        BasicSearch(const VectorMap<int, WString>& m, const WString& s);
     bool        RegexSearch(const VectorMap<int, WString>& m, const WString& s);
-   
-    struct TextAnchor : Moveable<TextAnchor> {
-        Point   pos    = {0, 0};
-        int     length = 0;
-    };
 
-    Vector<TextAnchor> foundtext;
+    SortedIndex<ItemInfo> foundtext;
 
     enum class Search {
         CaseSensitive,
@@ -114,6 +111,7 @@ private:
     Terminal&     term;
     Value         data;
     SearchField   text;
+    bool          cancel:1;
     FrameLeft<ToolButton> menu;
     FrameRight<DisplayCtrl> display;
     FrameRight<ToolButton> fsave, csave;

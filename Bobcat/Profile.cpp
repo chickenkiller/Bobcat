@@ -41,6 +41,7 @@ Profile::Profile()
 , bell(false)
 , blinktext(true)
 , shellintegration(false)
+, warnonrootaccess(false)
 , blinkinterval(500)
 , lightcolors(false)
 , adjustcolors(false)
@@ -52,6 +53,7 @@ Profile::Profile()
 , inlineimages(false)
 , hyperlinks(false)
 , annotations(false)
+, progress(false)
 , windowactions(false)
 , windowreports(true)
 , clipboardread(false)
@@ -86,6 +88,7 @@ Profile::Profile()
 , answerbackmsg("Bobcat")
 , encoding(CharsetName(CHARSET_UTF8))
 , ambiguoustowide(false)
+, addtopath(false)
 , user(GetUserName())
 , address(GetHomeDirectory())
 , command(GetDefaultShell())
@@ -117,10 +120,12 @@ void Profile::Jsonize(JsonIO& jio)
 	("Address",				 address)
 	("Env",					 env)
 	("DontInheritEnv",       noenv)
+	("AddExeDirToPATH",      addtopath)
 	("ShellIntegration",     shellintegration)
 	("Encoding",             encoding)
 	("TreatAmbiguousCharsAsWideChars", ambiguoustowide)
 	("WindowsPtyBackend",    ptybackend)
+	("WarnOnRootAccess",     warnonrootaccess)
 	("Font",				 font)
 	("LineSpacing",          linespacing)
 	("Bell",				 bell)
@@ -136,6 +141,7 @@ void Profile::Jsonize(JsonIO& jio)
 	("InlineImages",         inlineimages)
 	("Hyperlinks",           hyperlinks)
 	("Annotations",          annotations)
+	("ShowProgress",         progress)
 	("WindowActions",		 windowactions)
 	("WindowReports",		 windowreports)
 	("ClipboardReadAccess",  clipboardread)
@@ -167,7 +173,8 @@ void Profile::Jsonize(JsonIO& jio)
 	("Palette",              palette)
 	("Finder",               finder)
 	("Linkifier",            linkifier)
-	("QuickText",            quicktext);
+	("QuickText",            quicktext)
+	("WebSearch",            websearch);
 }
 
 Profiles::Setup::EmulationProfileSetup::EmulationProfileSetup()
@@ -216,6 +223,7 @@ Profiles::Setup::Setup()
 	tabs.Add(finder.SizePos(), t_("Finder"));
 	tabs.Add(linkifier.SizePos(), t_("Linkifier"));
 	tabs.Add(quicktext.SizePos(), t_("QuickText"));
+	tabs.Add(websearch.SizePos(), t_("Web Search"));
 	general.cmdexit.Add("exit", t_("Close the terminal"));
 	general.cmdexit.Add("keep", t_("Don't close the terminal"));
 	general.cmdexit.Add("restart", t_("Restart command"));
@@ -246,7 +254,11 @@ Profiles::Setup::Setup()
 		general.pty.Add("conpty", t_("ConPty"));
 	#endif
 	general.pty.Add("winpty", t_("Winpty")).SetIndex(0);
+	general.warnonrootaccess.Hide();
 #else
+	#ifndef PLATFORM_LINUX
+		general.warnonrootaccess.Hide();
+	#endif
 	general.pty.Hide();
 	general.ptylabel.Hide();
 #endif
@@ -266,9 +278,11 @@ void Profiles::Setup::MapData(CtrlMapper& m, Profile& p) const
      (general.shellintegration, p.shellintegration)
      (general.env,              p.env)
      (general.noenv,            p.noenv)
+     (general.addexetopath,     p.addtopath)
      (general.cmdexit,          p.onexit)
      (general.answerback,       p.answerbackmsg)
      (general.pty,              p.ptybackend)
+     (general.warnonrootaccess, p.warnonrootaccess)
      (visuals.font,             p.font)
      (visuals.linespacing,      p.linespacing)
      (visuals.cursorstyle,      p.cursorstyle)
@@ -290,6 +304,7 @@ void Profiles::Setup::MapData(CtrlMapper& m, Profile& p) const
      (emulation.images,         p.inlineimages)
      (emulation.hyperlinks,     p.hyperlinks)
      (emulation.annotations,    p.annotations)
+     (emulation.progress,       p.progress)
      (emulation.history,        p.history)
      (emulation.historysize,    p.historysize)
      (emulation.windowactions,  p.windowactions)
@@ -310,7 +325,8 @@ void Profiles::Setup::MapData(CtrlMapper& m, Profile& p) const
      (emulation.paste.pathdelimiter,   p.pathdelimiter)
      (emulation.paste.filter,          p.filterctrl)
      (emulation.selection.wordselmode,      p.wordselmode)
-     (emulation.selection.findselectedtext, p.findselectedtext);
+     (emulation.selection.findselectedtext, p.findselectedtext)
+     (emulation.selection.wordselpattern, p.wordselpattern);
 
 }
 
@@ -324,6 +340,7 @@ void Profiles::Setup::SetData(const Value& data)
 	finder.Load(p);
 	linkifier.Load(p);
 	quicktext.Load(p);
+	websearch.Load(p);
 }
 
 Value Profiles::Setup::GetData() const
@@ -333,6 +350,7 @@ Value Profiles::Setup::GetData() const
 	finder.Store(p);
 	linkifier.Store(p);
 	quicktext.Store(p);
+	websearch.Store(p);
 	return RawToValue(p);
 }
 
@@ -527,7 +545,7 @@ void Profiles::Drag()
 		list.RemoveSelection();
 }
 
-void Profiles::DnDInsert(int line, Upp::PasteClip& d)
+void Profiles::DnDInsert(int line, PasteClip& d)
 {
 	if(AcceptInternal<ArrayCtrl>(d, "profilelist")) {
 		const ArrayCtrl& src = GetInternal<ArrayCtrl>(d);

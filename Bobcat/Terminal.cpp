@@ -3,15 +3,11 @@
 
 #include "Bobcat.h"
 
-#define LLOG(x)  // RLOG(x)
-#define LDUMP(x) // RDUMP(x)
+#define LLOG(x)    // RLOG(x)
+#define LDUMP(x)   // RDUMP(x)
+#define LTIMING(x) // RTIMING(x)
 
 namespace Upp {
-
-#define KEYGROUPNAME TERMINALCTRL_KEYGROUPNAME
-#define KEYNAMESPACE TerminalCtrlKeys
-#define KEYFILE <Bobcat/Terminal.key>
-#include <CtrlLib/key_source.h>
 
 using namespace TerminalCtrlKeys;
 
@@ -22,10 +18,14 @@ Terminal::Terminal(Bobcat& ctx_)
 , canresize(true)
 , smartwordsel(false)
 , shellintegration(false)
+, warnonrootaccess(false)
+, starttime(Null)
 , finder(*this)
 , linkifier(*this)
 , quicktext(*this)
+, websearch(*this)
 , titlebar(*this)
+, progressbar(*this)
 , exitmode(ExitMode::Exit)
 , pathmode(PathMode::Native)
 , highlight {
@@ -35,7 +35,7 @@ Terminal::Terminal(Bobcat& ctx_)
 	SColorHighlight
 	}
 {
-	SetDeviceId("Bobcat");
+	SetDeviceId("Bobcat " + GetVersion());
 	InlineImages().Hyperlinks().WindowOps().DynamicColors().WantFocus();
 	
 	WhenBar     = [this](Bar& bar)             { ContextMenu(bar);                 };
@@ -51,9 +51,11 @@ Terminal::Terminal(Bobcat& ctx_)
 	WhenWindowFullScreen     = [this](int i)   { if(CanResize()) ctx.FullScreen(i);};
 	WhenWindowGeometryChange = [this](Rect r)  { if(CanResize()) ctx.SetRect(r);   };
 	WhenDirectoryChange      = THISFN(SetWorkingDirectory);
-	WhenHighlight  = THISFN(OnHighlight);
-	WhenAnnotation = THISFN(OnAnnotation);
-	WhenMessage    = THISFN(OnNotification);
+	WhenHighlight            = THISFN(OnHighlight);
+	WhenAnnotation           = THISFN(OnAnnotation);
+	WhenMessage              = THISFN(OnNotification);
+	WhenProgress             = THISFN(OnProgress);
+	WhenSelectorScan         = THISFN(OnSelectorScan);
 }
 
 Terminal::~Terminal()
@@ -77,10 +79,14 @@ void Terminal::PostParse()
 	Update();
 }
 
-bool Terminal::StartPty(const Profile& p)
+bool Terminal::StartPty(const Profile& p, bool pane)
 {
 	#ifdef PLATFORM_POSIX
+	#ifdef PLATFORM_LINUX
+	pty.Create<LinuxPtyProcess>().WhenAttrs = [this, &p](termios& t) -> bool
+	#else
 	pty.Create<PosixPtyProcess>().WhenAttrs = [this, &p](termios& t) -> bool
+	#endif
 	{
 		t.c_iflag |= IXANY;
 		#ifdef IUTF8
@@ -105,21 +111,39 @@ bool Terminal::StartPty(const Profile& p)
 		#endif
 	#endif
 
-	VectorMap<String, String> vv;
+	VectorMap<String, String> m;
 	if(!p.noenv)
-		vv = clone(Environment());
+		m = clone(Environment());
+	if(p.addtopath) {
+		String& s = m.GetAdd("PATH");
+		if(String  q = GetExeFolder(); s.Find(q) < 0) {
+			if(!IsNull(s)) {
+			#ifdef PLATFORM_WIN32
+				s += ";";
+			#else
+				s += ":";
+			#endif
+			}
+			s += q;
+		}
+	}
 	MemReadStream ms(p.env, p.env.GetLength());
 	while(!ms.IsEof()) {
 		String k, v;
 		if(SplitTo(ms.GetLine(), '=', k, v)) {
-			vv.GetAdd(k) = v;
+			m.GetAdd(k) = v;
 		}
 	}
 	
 	MakeTitle(profilename);
-	if(ctx.stack.Find(*this) < 0)
-		ctx.stack.Add(*this);
-	if(pty->Start(p.command, vv, p.address)) {
+	if(ctx.stack.Find(*this) < 0) {
+		if(pane)
+			ctx.stack.Split(*this);
+		else
+			ctx.stack.Add(*this);
+	}
+	if(pty->Start(p.command, m, p.address)) {
+		starttime = GetSysTime();
 		pty->SetSize(GetPageSize());
 		return true;
 	}
@@ -127,20 +151,20 @@ bool Terminal::StartPty(const Profile& p)
 	return false;
 }
 
-bool Terminal::Start(const Profile& p)
+bool Terminal::Start(const Profile& p, bool pane)
 {
 	SetProfile(p);
 	SetPalette(LoadPalette(p.palette));
-	return StartPty(p);
+	return StartPty(p, pane);
 }
 
-bool Terminal::Start(const String& profile_name)
+bool Terminal::Start(const String& profile_name, bool pane)
 {
 	Profile p = LoadProfile(profile_name);
-	return Start(p);
+	return Start(p, pane);
 }
 
-bool Terminal::Start(Terminal *term)
+bool Terminal::Start(Terminal *term, bool pane)
 {
 	Profile p;
 	if(term) {
@@ -149,7 +173,7 @@ bool Terminal::Start(Terminal *term)
 			p.address = term->workingdir;
 		}
 	}
-	return Start(p);
+	return Start(p, pane);
 }
 
 void Terminal::Restart()
@@ -172,6 +196,11 @@ bool Terminal::Do()
 {
 	if(pty->IsRunning()) {
 		Write(pty->Get(), IsUtf8Mode());
+		#ifdef PLATFORM_LINUX
+		// Warn the user about root access.
+		if(warnonrootaccess)
+			static_cast<LinuxPtyProcess&>(*pty).CheckPrivileges(*this);
+		#endif
 		return true;
 	}
 	if(ShouldExit())
@@ -188,6 +217,7 @@ bool Terminal::Do()
 void Terminal::Reset()
 {
 	HardReset();
+	progressbar.Hide();
 }
 
 bool Terminal::IsRunning()
@@ -208,6 +238,15 @@ bool Terminal::IsSuccess()
 bool Terminal::IsAsking()
 {
 	return !IsRunning() && exitmode == ExitMode::KeepAsking;
+}
+
+bool Terminal::IsRoot()
+{
+#ifdef PLATFORM_LINUX
+	return warnonrootaccess && static_cast<LinuxPtyProcess&>(*pty).IsRoot();
+#else
+	return false;
+#endif
 }
 
 void Terminal::DontExit()
@@ -304,8 +343,10 @@ Terminal& Terminal::SetProfile(const Profile& p)
 	workingdir  = p.address;
 	shellintegration = p.shellintegration;
 	findselectedtext = p.findselectedtext;
+	warnonrootaccess = p.warnonrootaccess;
 	bell = p.bell;
 	filter = p.filterctrl;
+	NotifyProgress(p.progress);
 	WindowActions(p.windowactions);
 	WindowReports(p.windowreports);
 	History(p.history);
@@ -350,6 +391,7 @@ Terminal& Terminal::SetProfile(const Profile& p)
 	smartwordsel = p.wordselmode == "smart";
 	finder.SetConfig(p);
 	linkifier.SetConfig(p);
+	websearch.SetConfig(p);
 	return *this;
 }
 
@@ -363,6 +405,17 @@ void Terminal::MouseLeave()
 {
 	linkifier.ClearPos();
 	Refresh();
+}
+
+void Terminal::MouseWheel(Point pt, int zdelta, dword keyflags)
+{
+	// Since we are using wheel, combine the keyflags for zoom-in and zoom-out.
+	if(dword k = GetAKModifierKey(AK_ZOOMIN())
+	           | GetAKModifierKey(AK_ZOOMOUT()); k > 0 && k == keyflags) {
+		SetFontZoom(zdelta >= 0 ? 1 : -1);
+	}
+	else
+		TerminalCtrl::MouseWheel(pt, zdelta, keyflags);
 }
 
 void Terminal::MouseMove(Point pt, dword keyflags)
@@ -388,6 +441,13 @@ Image Terminal::CursorImage(Point pt, dword keyflags)
 	if(IsMouseOverImplicitHyperlink())
 		return Image::Hand();
 	return TerminalCtrl::CursorImage(pt, keyflags);
+}
+
+void Terminal::GotFocus()
+{
+	TerminalCtrl::GotFocus();
+	if(IsSplitterPane())
+		ctx.stack.Goto(*this);
 }
 
 Terminal& Terminal::SetPalette(const Palette& p)
@@ -475,13 +535,13 @@ Terminal& Terminal::SetWordSelectionPattern(const String& s)
 	return *this;
 }
 
-Upp::Terminal& Terminal::SetPathTranslationMode(const String& s)
+Terminal& Terminal::SetPathTranslationMode(const String& s)
 {
 	pathmode = decode(s, "unix", PathMode::Unix, "windows", PathMode::Windows, PathMode::Native);
 	return *this;
 }
 
-Upp::Terminal& Terminal::SetPathDelimiter(const String& s)
+Terminal& Terminal::SetPathDelimiter(const String& s)
 {
 	pathdelimiter = s;
 	return *this;
@@ -626,7 +686,7 @@ String Terminal::GetLink()
 	if(IsMouseOverExplicitHyperlink())
 		return GetHyperlinkUri();
 	if(IsMouseOverImplicitHyperlink())
-		return linkifier.GetCurrentLinkInfo().url;
+		return linkifier.GetCurrentItemInfo().data;
 	return Null;
 }
 
@@ -672,6 +732,36 @@ bool Terminal::OnAnnotation(Point pt, String& s)
 void Terminal::OnNotification(const String& text)
 {
 	GetNotificationDaemon().NoIcon().Information(*this, text);
+}
+
+bool Terminal::OnSelectorScan(dword key)
+{
+	return MenuBar::Scan([&](Bar& menu) { websearch.ContextMenu(menu); }, key);
+}
+
+void Terminal::OnProgress(int type, int data)
+{
+	switch(type) {
+	case TerminalCtrl::PROGRESS_NORMAL:
+		progressbar.Show(data);
+		break;
+	case TerminalCtrl::PROGRESS_BUSY:
+		progressbar.Show(Null);
+		break;
+	case TerminalCtrl::PROGRESS_ERROR:
+		progressbar.Hide();
+		Error(*this, Format(t_("Progress failed.&Error code: %d"), data));
+		break;
+	case TerminalCtrl::PROGRESS_OFF:
+	default:
+		progressbar.Hide();
+		break;
+	}
+}
+
+bool Terminal::InProgress() const
+{
+	return progressbar.IsChild();
 }
 
 void Terminal::DragAndDrop(Point pt, PasteClip& d)
@@ -731,10 +821,74 @@ int Terminal::GetMousePosAsIndex() const
 	return GetPosAsIndex(GetMousePagePos(), true);
 }
 
-void Terminal::OnHighlight(VectorMap<int, VTLine>& hl)
+void Terminal::OnHighlight(VectorMap<int, VTLine>& line)
 {
+	HighlightInfo hl;
+	hl.line = &line;
 	linkifier.OnHighlight(hl);
 	finder.OnHighlight(hl);
+}
+
+void Terminal::DoHighlight(const SortedIndex<ItemInfo>& items, Upp::HighlightInfo& hl, const Event<HighlightInfo&>& cb)
+{
+	// Unified highlighting.
+	
+	LTIMING("Terminal::DoHighlight");
+	
+	auto ScanCells = [&](const ItemInfo& q) {
+		int col = 0;
+		hl.iteminfo = &q;
+		for(VTLine& l : *hl.line) {
+			for(VTCell& c : l) {
+				if(c.IsSpecial()) // offset special values (e.g. double width char trail)
+					continue;
+				if(q.pos.x + hl.offset <= col && col < q.pos.x + hl.offset + q.length) {
+					hl.highlighted.Add(&c);
+				}
+				else
+				if(!hl.highlighted.IsEmpty()) {
+					cb(hl);
+					hl.highlighted.Clear();
+				}
+				col++;
+			}
+		}
+		if(!hl.highlighted.IsEmpty())
+			cb(hl);
+	};
+
+	ItemInfo dummy;
+	
+	if(hl.adjusted) {
+		Vector<int> rows;
+		hl.offset  = -AdjustLineOffset(*this, hl.line->GetKeys(), rows);
+		for(int row : rows) {
+			dummy.pos.y = row;
+			if(int i = items.Find(dummy); i >= 0) {
+				do {
+					ScanCells(items[i]);
+					i = items.FindNext(i);
+				}
+				while(i >= 0);
+			}
+		}
+	}
+	else {
+		dummy.pos.y = hl.line->GetKey(0);
+		if(int i = items.Find(dummy); i >= 0) {
+			do {
+				hl.posindex = GetPosAsIndex(items[i].pos, true);
+				ScanCells(items[i]);
+				i = items.FindNext(i);
+			}
+			while(i >= 0);
+		}
+	}
+}
+
+WString Terminal::GetSelectedText() const
+{
+	return TerminalCtrl::GetSelectedText();
 }
 
 bool Terminal::GetWordSelection(const Point& pt, Point& pl, Point& ph) const
@@ -766,7 +920,7 @@ bool Terminal::GetWordSelectionByPattern(const Point& pt, Point& pl, Point& ph) 
 		WString q;
 		for(const VTLine& l : m)
 			q << l.ToWString();
-
+		
 		if(q.IsEmpty())
 			return false;
 
@@ -774,11 +928,12 @@ bool Terminal::GetWordSelectionByPattern(const Point& pt, Point& pl, Point& ph) 
 		pos += pt.x - GetOffset(page.FetchLine(pt.y), 0, pt.x);
 		
 		RegExp r(sp);
-		String l = ToUtf8(q);
-		while(r.GlobalMatch(l)) {
+		String s = ToUtf8(q);
+	
+		while(r.GlobalMatch(s)) {
 			int o = r.GetOffset();
-			int begin = Utf32Len(~l, o);
-			int end   = begin + Utf32Len(~l + o, r.GetLength());
+			int begin = Utf32Len(~s, o);
+			int end   = begin + Utf32Len(~s + o, r.GetLength());
 			if(pos >= begin && pos < end) {
 				for(int col = 0, row = 0, offset = 0; row < m.GetCount(); row++) {
 					const VTLine& l = m[row];
@@ -803,7 +958,7 @@ bool Terminal::GetWordSelectionByPattern(const Point& pt, Point& pl, Point& ph) 
 	return false;
 }
 
-Terminal& Terminal::PutText(const Upp::WString& txt)
+Terminal& Terminal::PutText(const WString& txt)
 {
 	TerminalCtrl::Put(txt);
 	return *this;
@@ -839,8 +994,8 @@ void Terminal::EditMenu(Bar& menu)
 	if(HasHyperlinks() && IsMouseOverLink()) {
 		menu.Separator();
 		String lnk = GetLink();
-		menu.Add(AK_COPYLINK, Images::Copy(),  [this, lnk = pick(lnk)] { CopyLink(lnk); });
-		menu.Add(AK_OPENLINK, CtrlImg::open(), [this, lnk = pick(lnk)] { OpenLink(lnk); });
+		menu.Add(AK_COPYLINK, Images::Copy(),  [this, lnk] { CopyLink(lnk); });
+		menu.Add(AK_OPENLINK, CtrlImg::open(), [this, lnk] { OpenLink(lnk); });
 	}
 	else
 	if(HasAnnotations() && IsMouseOverAnnotation()) {
@@ -865,6 +1020,7 @@ void Terminal::EditMenu(Bar& menu)
 	}
 	menu.Separator();
 	menu.Add(AK_FINDER, Images::Find(), [this] { OpenFinder(); });
+	websearch.ContextMenu(menu);
 	menu.AddKey(AK_SELECTOR_ENTER,      [this] { BeginSelectorMode(); });
 	menu.AddKey(AK_QUICKTEXT,           [this] { quicktext.Popup(); });
 }
@@ -898,10 +1054,14 @@ void Terminal::EmulationMenu(Bar& menu)
 	menu.Add(AK_INLINEIMAGES,     [this] { InlineImages(!HasInlineImages()); }).Check(HasInlineImages());
 	menu.Add(AK_HYPERLINKS,       [this] { Hyperlinks(!HasHyperlinks()); }).Check(HasHyperlinks());
 	menu.Add(AK_ANNOTATIONS,      [this] { Annotations(!HasAnnotations()); }).Check(HasAnnotations());
+	menu.Add(AK_PROGRESS,         [this] { NotifyProgress(!IsNotifyingProgress()); }).Check(IsNotifyingProgress());
 	menu.Add(AK_SIZEHINT,         [this] { ShowSizeHint(!HasSizeHint()); }).Check(HasSizeHint());
 	menu.Add(AK_BUFFEREDREFRESH,  [this] { DelayedRefresh(!IsDelayingRefresh()); }).Check(IsDelayingRefresh());
 	menu.Add(AK_LAZYRESIZE,       [this] { LazyResize(!IsLazyResizing()); }).Check(IsLazyResizing());
 	menu.Add(AK_WIDECHARS,        [this] { TreatAmbiguousCharsAsWideChars(IsUtf8Mode() && !IsAmbiguousCharsWide()); }).Check(IsAmbiguousCharsWide()).Enable(IsUtf8Mode());
+#ifdef PLATFORM_LINUX
+	menu.Add(AK_WARNROOT,         [this] { warnonrootaccess = !warnonrootaccess; }).Check(warnonrootaccess);
+#endif
 }
 
 void Terminal::ContextMenu(Bar& menu)
@@ -924,6 +1084,21 @@ void Terminal::ContextMenu(Bar& menu)
 	ctx.HelpMenu(menu);
 	menu.AddKey(AK_CLOSE, [this] { Stop(); });
 	menu.AddKey(AppKeys::AK_EXIT, [this] { ctx.Close(); });
+}
+
+Splitter* Terminal::GetParentSplitter() const
+{
+	return dynamic_cast<Splitter*>(GetParent());
+}
+
+bool Terminal::IsSplitterPane() const
+{
+	return GetParentSplitter() != nullptr;
+}
+
+Time Terminal::GetUpTime() const
+{
+	return Time(1, 1, 1, 0, 0, 0) + (GetSysTime() - starttime);
 }
 
 Terminal::TitleBar::TitleBar(Terminal& ctx)
@@ -986,6 +1161,60 @@ void Terminal::TitleBar::Menu()
 	if(Vector<String> pnames = GetProfileNames(); pnames.GetCount()) {
 		MenuBar::Execute([this, &pnames](Bar& menu) { term.ctx.TermSubmenu(menu, pnames);});
 	}
+}
+
+Terminal::ProgressBar::ProgressBar(Terminal& t)
+: term(t)
+{
+}
+
+void Terminal::ProgressBar::SetData(const Value& v)
+{
+	data = v;
+	term.RefreshLayout();
+}
+
+Value Terminal::ProgressBar::GetData() const
+{
+	return data;
+}
+
+void Terminal::ProgressBar::FrameLayout(Rect& r)
+{
+	// Snap to title bar.
+	term.titlebar.data == "bottom"
+		? LayoutFrameBottom(r, this, cy ? cy : r.Height())
+		: LayoutFrameTop(r, this, cy ? cy : r.Height()); // default
+}
+
+void Terminal::ProgressBar::Show(int percent)
+{
+	if(!IsChild()) {
+		bool b = term.HasSizeHint();
+		term.HideSizeHint();
+		int i = term.FindFrame(term.titlebar);
+		term.InsertFrame(decode(i, 0, 1, 0), Height(Zy(4)));
+		term.ShowSizeHint(b);
+	}
+	timer.Kill();
+	if(IsNull(percent)) { // "Busy" mode...
+		Set(0, 0);
+		timer.Set(-12, [this] { if(IsChild()) static_cast<ProgressIndicator&>(*this)++; });
+	}
+	else
+		Set(percent, 100);
+}
+
+void Terminal::ProgressBar::Hide()
+{
+	if(IsChild()) {
+		bool b = term.HasSizeHint();
+		term.HideSizeHint();
+		term.RemoveFrame(*this);
+		term.ShowSizeHint(b);
+	}
+	timer.Kill();
+	Set(0, 0);
 }
 
 Terminal& AsTerminal(Ctrl& c)

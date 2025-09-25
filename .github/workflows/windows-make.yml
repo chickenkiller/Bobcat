@@ -28,7 +28,7 @@ jobs:
 
     - name: Download U++ Windows release
       run: |
-        Invoke-WebRequest -Uri "https://github.com/ultimatepp/ultimatepp/releases/download/2024.1.1/upp-win-17490.7z" -OutFile "upp-win.7z"
+        Invoke-WebRequest -Uri "https://github.com/ultimatepp/ultimatepp/releases/download/v2025.1.1/upp-win-17810.7z" -OutFile "upp-win.7z"
 
     - name: Extract U++ release
       run: |
@@ -41,12 +41,6 @@ jobs:
       with:
         repository: ismail-yilmaz/Terminal
         path: upp-source/upp/UppHub/Terminal
-
-    - name: Checkout StackCtrl repository
-      uses: actions/checkout@v3
-      with:
-        repository: ismail-yilmaz/StackCtrl
-        path: upp-source/upp/UppHub/StackCtrl
 
     - name: Checkout MessageCtrl repository
       uses: actions/checkout@v3

@@ -17,6 +17,7 @@ struct Profile : Moveable<Profile> {
     bool        noenv;
     bool        shellintegration;
     String      ptybackend;
+    bool        warnonrootaccess;
     Font        font;
     bool        bell;
     bool        blinktext;
@@ -32,6 +33,7 @@ struct Profile : Moveable<Profile> {
     bool        inlineimages;
     bool        hyperlinks;
     bool        annotations;
+    bool        progress;
     bool        windowactions;
     bool        windowreports;
     bool        clipboardread;
@@ -61,12 +63,14 @@ struct Profile : Moveable<Profile> {
     String      pathtranslation;
     String      pathdelimiter;
     String      answerbackmsg;
+    bool        addtopath;
     bool        filterctrl;
     bool        sizehint;
     int         order;
     Finder::Config finder;
     Linkifier::Config linkifier;
     QuickText::Config quicktext;
+    WebSearch::Config websearch;
     hash_t      GetHashValue() const;
     void        Serialize(Stream& s);
     void        Jsonize(JsonIO& jio);
@@ -113,6 +117,7 @@ private:
         mutable         FinderSetup                            finder;
         mutable         LinkifierSetup                         linkifier;
         mutable         QuickTextSetup                         quicktext;
+        mutable         WebSearchSetup                         websearch;
         mutable         Palettes                               palettes;
     };
     
@@ -122,9 +127,6 @@ private:
 public:
     Setup       setup;
 };
-
-dword          GetModifierKey(String s);
-String         GetModifierKeyDesc(dword keyflags);
 
 Profile        LoadProfile(const String& name);
 int            LoadProfiles(VectorMap<String, Profile>& v);

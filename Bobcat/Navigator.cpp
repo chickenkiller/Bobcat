@@ -42,13 +42,21 @@ void Navigator::Item::Paint(Draw& w)
 		w.DrawImage(q.Deflated(8), img);
 		w.DrawImage(r, r.Contains(pos) ? Images::DeleteHL2() : Images::DeleteHL());
 		if(ctrl) {
-			if(ctrl->IsRunning() && dnd) {
-				const Image& ico = Images::DropClipHD();
-				w.DrawRect(q, SColorHighlight);
-				w.DrawImage(q.CenterRect(ico.GetSize()), ico);
+			if(ctrl->IsRunning()) {
+				if(dnd) {
+					const Image& ico = Images::DropClipHD();
+					w.DrawRect(q, SColorHighlight);
+					w.DrawImage(q.CenterRect(ico.GetSize()), ico);
+				}
+				// Always overlay
+				if(blinking && ctrl->IsRoot()) {
+					const char *txt = t_("Privilege escalation!");
+					Point pt = q.CenterPos(GetTextSize(txt, StdFont().Bold()));
+					w.DrawText(pt.x, pt.y, txt, StdFont().Bold(), LtRed());
+				}
 			}
 			else
-			if(!ctrl->IsRunning() && blinking) {
+			if(blinking) {
 				Image ico;
 				if(ctrl->IsFailure()) {
 					if(ctrl->IsAsking())
@@ -154,7 +162,7 @@ Navigator::Navigator(Bobcat& ctx_)
 	searchbar.profiles << [this] {
 		Vector<String> pnames = GetProfileNames();
 		if(pnames.GetCount())
-		    MenuBar::Execute([this, &pnames](Bar& bar) {
+			MenuBar::Execute([this, &pnames](Bar& bar) {
 				ctx.TermSubmenu(bar, pnames);
 			});
 	};
@@ -207,43 +215,43 @@ bool Navigator::FilterItem(const Item& item)
 
 int Navigator::SyncItemLayout()
 {
-    for(auto& m : items)
-        m.Hide();
-    
-    auto v = FilterRange(items, [=](const Item& item) { return FilterItem(item); });
-    if(!v.GetCount())
+	for(auto& m : items)
+		m.Hide();
+	
+	auto v = FilterRange(items, [=](const Item& item) { return FilterItem(item); });
+	if(!v.GetCount())
 		return v.GetCount();
- 
-    int cnt = max(v.GetCount(), 1);
-    int fcy = GetStdFontSize().cy;
 
-    Point margins = { 16, fcy * 2 };
-    
-    Size viewsize = GetSize() + Size(0, searchbar.GetHeight());
-    Size cellsize = GetRatioSize(viewsize, 200, 0);
-    
-    Size gridsize;
-    gridsize.cx = min(max(1, viewsize.cx / (cellsize.cx + margins.x)), min(4, cnt));
-    gridsize.cy = (cnt + gridsize.cx - 1) / gridsize.cx;
-    
+	int cnt = max(v.GetCount(), 1);
+	int fcy = GetStdFontSize().cy;
+
+	Point margins = { 16, fcy * 2 };
+	
+	Size viewsize = GetSize() + Size(0, searchbar.GetHeight());
+	Size cellsize = GetRatioSize(viewsize, 200, 0);
+	
+	Size gridsize;
+	gridsize.cx = min(max(1, viewsize.cx / (cellsize.cx + margins.x)), min(4, cnt));
+	gridsize.cy = (cnt + gridsize.cx - 1) / gridsize.cx;
+	
 	Size totalsize = gridsize * cellsize + (gridsize + 1) * margins;
-       
-    Point offset = max({ 8, 8 }, Rect(viewsize).CenterRect(totalsize).TopLeft());
-    
-    sb.SetTotal(totalsize.cy);
-    sb.SetPage(viewsize.cy);
-    
-    int row = 0, col = 0;
-    for(Item& m : v) {
-        Rect r(offset + Point(col, row) * (cellsize + margins), cellsize);
-        m.SetRect(r.OffsetedVert(-sb));
-        m.Show();
-        if(++col >= gridsize.cx) {
-            col = 0;
-            row++;
-        }
-    }
-    return v.GetCount();
+	
+	Point offset = max({ 8, 8 }, Rect(viewsize).CenterRect(totalsize).TopLeft());
+	
+	sb.SetTotal(totalsize.cy);
+	sb.SetPage(viewsize.cy);
+	
+	int row = 0, col = 0;
+	for(Item& m : v) {
+		Rect r(offset + Point(col, row) * (cellsize + margins), cellsize);
+		m.SetRect(r.OffsetedVert(-sb));
+		m.Show();
+		if(++col >= gridsize.cx) {
+			col = 0;
+			row++;
+		}
+	}
+	return v.GetCount();
 }
 
 void Navigator::Sync()
@@ -268,7 +276,7 @@ void Navigator::Sync()
 			ImageDraw w(csz);
 			m.ctrl->Paint(w);
 			m.img = Rescale(w, max(1, isz.cx - 4), max(1, isz.cy - fsz.cy));
-			if(!m.ctrl->IsRunning())
+			if(!m.ctrl->IsRunning() || m.ctrl->IsRoot())
 				blinking++;
 			if(!m.IsChild())
 				Add(m);
@@ -302,7 +310,7 @@ void Navigator::Sync()
 void Navigator::Animate()
 {
 	for(Item& m : items)
-		if(m.ctrl && !m.ctrl->IsRunning()) {
+		if(m.ctrl && (!m.ctrl->IsRunning() || m.ctrl->IsRoot())) {
 			m.blinking ^= 1;
 			m.Refresh();
 		}
@@ -316,21 +324,12 @@ void Navigator::Layout()
 
 int Navigator::GetCursor()
 {
-	return FindMatch(items, [](const Item& m) { return m.HasFocus(); });
+	return FindMatch(items, [](const Item& m) { return m.HasFocus() ; });
 }
 
 void Navigator::SwapItem(int i, int ii)
 {
-	if(AnimateSwap(i, ii))
-		return;
-
-	Item& a = items[i];
-	Item& b = items[ii];
-	ctx.stack.Swap(*a.ctrl, *b.ctrl);
-	Swap(a.ctrl, b.ctrl);
-	Swap(a.img, b.img);
-	b.SetFocus();
-	Refresh();
+	ctx.stack.Swap(*items[i].ctrl, *items[ii].ctrl);
 }
 
 void Navigator::SwapFirst()
@@ -357,15 +356,16 @@ void Navigator::SwapNext()
 		SwapItem(i, i + 1);
 }
 
-bool Navigator::AnimateSwap(int i, int ii)
+void Navigator::AnimateSwap(int i, int ii)
 {
-	if(swapanim)
-		return true;
+	if(!IsShown() || swapanim)
+		return;
 	
 	swapanim = true;
 	
 	Item& a = items[i];
 	Item& b = items[ii];
+	
 	Rect ra = a.GetRect();
 	Rect rb = b.GetRect();
 	
@@ -394,8 +394,13 @@ bool Navigator::AnimateSwap(int i, int ii)
 		GuiSleep(0);
 	}
 	
+	Swap(a.ctrl, b.ctrl);
+	Swap(a.img, b.img);
+
+	b.SetFocus();
+	Refresh();
+
 	swapanim = false;
-	return false;
 }
 
 void Navigator::Paint(Draw& w)

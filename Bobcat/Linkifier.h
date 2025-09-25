@@ -17,12 +17,6 @@ struct PatternInfo : Moveable<PatternInfo> {
 
 VectorMap<String, Vector<PatternInfo>>& GetHyperlinkPatterns();
 
-struct LinkInfo : Moveable<LinkInfo> {
-    Point pos  = { 0, 0 };
-    int length = 0;
-    String url;
-};
-
 class Linkifier {
 public:
     typedef Linkifier CLASSNAME;
@@ -44,9 +38,9 @@ public:
     void        ClearPos();
 
     int         GetCount() const;
-    LinkInfo&   operator[](int i);
+    const ItemInfo& operator[](int i);
 
-    const LinkInfo& GetCurrentLinkInfo() const;
+    const ItemInfo& GetCurrentItemInfo() const;
    
     void        Clear();
     bool        Sync();
@@ -55,12 +49,7 @@ public:
     void        Search();
     void        Update();
 
-    void        OnHighlight(VectorMap<int, VTLine>& hl);
-    
-    const LinkInfo* begin() const;
-    LinkInfo*       begin();
-    const LinkInfo* end() const;
-    LinkInfo*       end();
+    void        OnHighlight(HighlightInfo& hlinfo);
     
     struct Config {
         Config();
@@ -73,7 +62,7 @@ private:
     int         cursor;
     int         pos;
     bool        enabled:1;
-    Vector<LinkInfo> links;
+    SortedIndex<ItemInfo> links;
 };
 
 class LinkifierSetup : public WithLinkifierProfileLayout<ParentCtrl> {

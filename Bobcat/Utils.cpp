@@ -203,23 +203,37 @@ bool AnnotationEditor(String& s, const char *title)
 	return false;
 }
 
+int AdjustLineOffset(Terminal& term, const Vector<int>& in, Vector<int>& out)
+{
+	int i = 0, dx = 0;
+	auto range = term.GetPageRange();
+	if(out = clone(in), i = out[0]; i == range.a) {
+		if(auto span = term.GetPage().GetLineSpan(i); i > span.a && i <= span.b) {
+			dx = GetLength(term.GetPage(), span.a, i);
+			for(int j = 0; j < out.GetCount(); j++)
+				out[j] = span.a + j;
+		}
+	}
+	return dx;
+}
+
 static const Vector<Tuple<dword, const char*>> mod_keys = {
-    { K_SHIFT,              "K_SHIFT" },
-    { K_ALT,                "K_ALT"   },
-    { K_CTRL,               "K_CTRL"  },
-    { K_CTRL|K_ALT,         "K_CTRL_ALT" },
-    { K_SHIFT|K_CTRL,       "K_SHIFT_CTRL" },
-    { K_SHIFT|K_ALT,        "K_SHIFT_ALT"  },
-    { K_SHIFT|K_CTRL|K_ALT, "K_SHIFT_CTRL_ALT" },
+	{ K_SHIFT,              "K_SHIFT" },
+	{ K_ALT,                "K_ALT"   },
+	{ K_CTRL,               "K_CTRL"  },
+	{ K_CTRL|K_ALT,         "K_CTRL_ALT" },
+	{ K_SHIFT|K_CTRL,       "K_SHIFT_CTRL" },
+	{ K_SHIFT|K_ALT,        "K_SHIFT_ALT"  },
+	{ K_SHIFT|K_CTRL|K_ALT, "K_SHIFT_CTRL_ALT" },
 #ifdef PLATFORM_COCOA
-    { K_OPTION,                      "K_OPTION"      },
-    { K_OPTION|K_SHIFT,              "K_SHIFT_OPTION " },
-    { K_OPTION|K_ALT,                "K_ALT_OPTION " },
-    { K_OPTION|K_CTRL,               "K_CTRL_OPTION" },
-    { K_OPTION|K_CTRL|K_ALT,         "K_CTRL_ALT_OPTION " },
-    { K_OPTION|K_SHIFT|K_ALT,        "K_SHIFT_ALT_OPTION " },
-    { K_OPTION|K_ALT,                "K_SHIFT_CTRL_OPTION " },
-    { K_OPTION|K_SHIFT|K_CTRL|K_ALT, "K_SHIFT_CTRL_ALT_OPTION" },
+	{ K_OPTION,                      "K_OPTION"      },
+	{ K_OPTION|K_SHIFT,              "K_SHIFT_OPTION " },
+	{ K_OPTION|K_ALT,                "K_ALT_OPTION " },
+	{ K_OPTION|K_CTRL,               "K_CTRL_OPTION" },
+	{ K_OPTION|K_CTRL|K_ALT,         "K_CTRL_ALT_OPTION " },
+	{ K_OPTION|K_SHIFT|K_ALT,        "K_SHIFT_ALT_OPTION " },
+	{ K_OPTION|K_ALT,                "K_SHIFT_CTRL_OPTION " },
+	{ K_OPTION|K_SHIFT|K_CTRL|K_ALT, "K_SHIFT_CTRL_ALT_OPTION" },
 #endif
 };
 
@@ -233,16 +247,30 @@ dword GetModifierKey(String s)
 
 String GetModifierKeyDesc(dword key)
 {
+#ifdef PLATFORM_COCOA
+	key &= (K_SHIFT|K_CTRL|K_ALT|K_OPTION);
+#else
 	key &= (K_SHIFT|K_CTRL|K_ALT);
+#endif
 	for(const auto& t : mod_keys)
 		if(t.a == key)
 			return t.b;
 	return String::GetVoid();
 }
 
+dword GetAKModifierKey(const KeyInfo& k, int index)
+{
+	ASSERT(index >= 0 && index < 4);
+#ifdef PLATFORM_COCOA
+	return k.key[index] & (K_CTRL|K_ALT|K_SHIFT|K_OPTION);
+#else
+	return k.key[index] & (K_CTRL|K_ALT|K_SHIFT);
+#endif
+}
+
 String GetVersion()
 {
-	String ver = Format("%d.%d.%d", 0, 9, 1);
+	String ver = Format("%d.%d.%d", 0, 9, 6);
 
 #ifdef bmGIT_REVCOUNT
 	return ver + " (r" + bmGIT_REVCOUNT + ")";
@@ -293,7 +321,10 @@ String GetBuildInfo()
 #endif
 
 #ifdef GUI_GTK
-	h << " (Gtk)";
+	int i = 0;
+	if(auto ctx = GetContext(); ctx)
+		i = ctx->window.IsWayland() ? 1 : 0;
+	h << Format(" (Gtk - %[1:Wayland;XWayland]s)", i);
 #elif  flagWEBGUI
 	h << " (Turtle)";
 #elif  flagSDLGUI
@@ -304,7 +335,7 @@ String GetBuildInfo()
 	h << t_("Compiled") << ": " << bmTIME;
 #endif
 
-	h << '\n';;
+	h << '\n';
 	h << t_("Path") << ": " << GetExeFilePath();
 
 	return h;
@@ -314,7 +345,7 @@ Vector<Tuple<void (*)(), String, String>> GetAllGuiThemes()
 {
 	return Vector<Tuple<void (*)(), String, String>> {
 		{ ChHostSkin, "host", tt_("Host platform") },
-	    { ChClassicSkin, "classic", tt_("Classic") },
+		{ ChClassicSkin, "classic", tt_("Classic") },
 		{ ChStdSkin, "standard", tt_("Standard") },
 		{ ChGraySkin, "gray", tt_("Gray") },
 		{ ChDarkSkin, "dark", tt_("Dark") },
@@ -339,12 +370,34 @@ void LoadGuiFont(Bobcat& ctx)
 	SetStdFont(Nvl(ctx.settings.guifont, GetStdFont()));
 }
 
+bool IsWaylandEnabled()
+{
+#ifdef GUI_GTK
+	auto ctx = GetContext();
+	return ctx
+		&& (ctx->window.IsWayland() || ctx->window.IsXWayland())
+		&& FileExists(ConfigFile("USE_WAYLAND"));
+#else
+	return false;
+#endif
+}
+
+void EnableWayland(bool enabled)
+{
+#ifdef GUI_GTK
+	if(auto ctx = GetContext(); ctx && IsWaylandEnabled() != enabled) {
+		String wlpath = ConfigFile("USE_WAYLAND");
+		enabled ? SaveFile(wlpath, Null) : DeleteFile(wlpath);
+	}
+#endif
+}
+
 MessageCtrl& GetNotificationDaemon()
 {
 	return Single<MessageCtrl>();
 }
 
-void AskYesNo(Ctrl& ctrl, const String& text, const String& yes, const String& no, MessageBox::Type type, const Event<int>& action)
+Ptr<MessageBox> AskYesNo(Ctrl& ctrl, const String& text, const String& yes, const String& no, MessageBox::Type type, const Event<int>& action)
 {
 	auto& m = GetNotificationDaemon();
 	auto& c = m.Create();
@@ -355,29 +408,30 @@ void AskYesNo(Ctrl& ctrl, const String& text, const String& yes, const String& n
 	c.UseIcon(false);
 	c.Set(ctrl, text, m.IsAnimated(), m.IsAppending(), 0);
 	c.WhenAction = action;
+	return &c;
 }
 
-void AskRestartExitError(Ptr<Terminal> t, const Profile& p)
+Ptr<MessageBox> AskRestartExitError(Ptr<Terminal> t, const Profile& p)
 {
 	t->KeepAsking();
 	const char *txt = t_("Command execution failed.&Profile: %s&Command: %s&Exit code: %d");
 	String text = Format(txt, p.name, p.command, t->pty->GetExitCode());
-	AskYesNo(*t, text, t_("Restart"), t_("Exit"), MessageBox::Type::FAILURE, [t](int id) {
+	return AskYesNo(*t, text, t_("Restart"), t_("Exit"), MessageBox::Type::FAILURE, [t](int id) {
 		if(t) id == IDYES ? t->ScheduleRestart() : t->ScheduleExit();
 	});
 }
 
-void AskRestartExitError(Ptr<Terminal> t)
+Ptr<MessageBox> AskRestartExitError(Ptr<Terminal> t)
 {
-	AskRestartExitError(t, LoadProfile(t->profilename));
+	return AskRestartExitError(t, LoadProfile(t->profilename));
 }
 
-void AskRestartExitOK(Ptr<Terminal> t, const Profile& p)
+Ptr<MessageBox> AskRestartExitOK(Ptr<Terminal> t, const Profile& p)
 {
 	t->KeepAsking();
 	const char *txt = t_("Command exited.&Profile: %s&Command: %s&Exit code: %d");
 	String text = Format(txt, p.name, p.command, t->pty->GetExitCode());
-	AskYesNo(*t, text, t_("Restart"), t_("Close"), MessageBox::Type::INFORMATION, [t](int id) {
+	return AskYesNo(*t, text, t_("Restart"), t_("Close"), MessageBox::Type::INFORMATION, [t](int id) {
 		if(!t) return;
 		if(id == IDYES) {
 			t->ScheduleRestart();
@@ -388,9 +442,38 @@ void AskRestartExitOK(Ptr<Terminal> t, const Profile& p)
 	});
 }
 
-void AskRestartExitOK(Ptr<Terminal> t)
+Ptr<MessageBox> AskRestartExitOK(Ptr<Terminal> t)
 {
-	AskRestartExitOK(t, LoadProfile(t->profilename));
+	return AskRestartExitOK(t, LoadProfile(t->profilename));
+}
+
+Ptr<MessageBox> Warning(Ctrl& ctrl, const String& text, int timeout)
+{
+	auto& m = GetNotificationDaemon();
+	auto& c = m.Create();
+	c.MessageType(MessageBox::Type::WARNING);
+	c.Placement(m.GetPlacement());
+	c.UseIcon(false);
+	c.UseCross();
+	c.Set(ctrl, text, m.IsAnimated(), m.IsAppending(), timeout);
+	return &c;
+}
+
+Ptr<MessageBox> Error(Ctrl& ctrl, const Upp::String& text, int timeout)
+{
+	auto& m = GetNotificationDaemon();
+	auto& c = m.Create();
+	c.MessageType(MessageBox::Type::FAILURE);
+	c.Placement(m.GetPlacement());
+	c.UseIcon(false);
+	c.UseCross();
+	c.Set(ctrl, text, m.IsAnimated(), m.IsAppending(), timeout);
+	return &c;
+}
+
+String GetUpTime(Time t)
+{
+	return Format("%d:%0d:%02d:%02d", t - Date(1, 1, 1), t.hour, t.minute, t.second);
 }
 
 String GetDefaultShell()
@@ -480,14 +563,14 @@ Vector<const CmdArg*> FindCmdArgs(CmdArgType t)
 
 const char* GetCmdArgTypeName(CmdArgType cat)
 {
-    switch(cat) {
-    case CmdArgType::General:     return t_("General");
-    case CmdArgType::Environment: return t_("Environment");
-    case CmdArgType::Emulation:   return t_("Emulation");
-    case CmdArgType::Appearance:  return t_("Appearance");
-    default:  break;
-    }
-    return t_("Other");
+	switch(cat) {
+	case CmdArgType::General:     return t_("General");
+	case CmdArgType::Environment: return t_("Environment");
+	case CmdArgType::Emulation:   return t_("Emulation");
+	case CmdArgType::Appearance:  return t_("Appearance");
+	default:  break;
+	}
+	return t_("Other");
 }
 
 const String& CmdArgList::Get(const char *id, const String& defval)
@@ -507,61 +590,61 @@ CmdArgParser::CmdArgParser(const Array<CmdArg>& args)
 
 bool CmdArgParser::Parse(const Vector<String>& cmdline, CmdArgList& list, String& error)
 {
-     list.options.Clear();
-     list.command.Clear();
-     bool cmdsep = false;
-     
-     for(int i = 0; i < cmdline.GetCount(); i++) {
-         const String& arg = cmdline[i];
-         
-         // Handle command after "--"
-         if(cmdsep) {
-             list.command << arg << ' ';
-            continue;
-         }
-         
-         if(arg == "--") {
-             cmdsep = true;
-             continue;
-         }
-         
-         // Parse options
-         if(arg[0] == '-') {
-             const CmdArg* opt = Find(arg);
-             if(!opt) {
-                 error = Format(t_("Unknown option: %s"), arg);
-                 return false;
-             }
-             
-             String value = String(opt->arg);
-             if(!value.IsEmpty()) {
-                 // Option requires a value
-                 if(i + 1 >= cmdline.GetCount()) {
-                     error = Format(t_("Option '%s' requires a value"), arg);
-                     return false;
-                 }
-                 value = cmdline[++i];
-             }
-             
-             // Store using the long option name for consistency
-             list.options.Add(opt->lopt, value);
-         }
-         else {
-             list.command = arg;
-         }
-     }
-     
-     if(!IsNull(list.command))
-	     list.command = TrimBoth(list.command);
+	list.options.Clear();
+	list.command.Clear();
+	bool cmdsep = false;
+	
+	for(int i = 0; i < cmdline.GetCount(); i++) {
+		const String& arg = cmdline[i];
+		
+		// Handle command after "--"
+		if(cmdsep) {
+			list.command << arg << ' ';
+			continue;
+		}
+		
+		if(arg == "--") {
+			cmdsep = true;
+			continue;
+		}
+		
+		// Parse options
+		if(arg[0] == '-') {
+			const CmdArg* opt = Find(arg);
+			if(!opt) {
+				error = Format(t_("Unknown option: %s"), arg);
+				return false;
+			}
+			
+			String value = String(opt->arg);
+			if(!value.IsEmpty()) {
+				// Option requires a value
+				if(i + 1 >= cmdline.GetCount()) {
+					error = Format(t_("Option '%s' requires a value"), arg);
+					return false;
+				}
+				value = cmdline[++i];
+			}
+			
+			// Store using the long option name for consistency
+			list.options.Add(opt->lopt, value);
+		}
+		else {
+			list.command = arg;
+		}
+	}
+	
+	if(!IsNull(list.command))
+		list.command = TrimBoth(list.command);
 
-     return true;
+	return true;
 }
 
-const Upp::CmdArg *CmdArgParser::Find(const String& arg) const
+const CmdArg *CmdArgParser::Find(const String& arg) const
 {
 	if(arg.GetCount() < 2 || arg[0] != '-')
 		return nullptr;
-      
+	
 	bool islopt = arg[1] == '-';
 	
 	String s = arg.Mid(islopt ? 2 : 1);
@@ -576,5 +659,113 @@ const Upp::CmdArg *CmdArgParser::Find(const String& arg) const
 	}
 	return nullptr;
 }
+
+Size ParsePageSize(const String& s)
+{
+	// Accepted formats: COLxROW or COL:ROW
+	auto sDelimFn = [](int c) { return decode(c, 'x', 1, ':', 1, 0); };
+	if(String c, r; SplitTo(ToLower(s), sDelimFn, c, r)) {
+		return { clamp(StrInt(c), 10, 300), clamp(StrInt(r), 10, 300) };
+	}
+	return  Null;
+}
+
+#ifdef PLATFORM_LINUX
+
+pid_t GetProcessGroupId(APtyProcess& pty)
+{
+	return tcgetpgrp(static_cast<LinuxPtyProcess&>(pty).GetSocket());
+}
+
+void ReadProcessStatus(pid_t pid, const Gate<String&>& fn)
+{
+	if(FILE *f = fopen(~Format("/proc/%d/status", pid), "r"); f) {
+		char line[256] = { 0 };
+		while(fgets(line, sizeof(line), f)) {
+			String ln(line, min(sizeof(line), strlen(line)));
+			if(fn(ln))
+				break;
+		}
+		fclose(f);
+	}
+}
+
+Tuple<uid_t, uid_t> GetUserIdsFromProcess(pid_t pid)
+{
+	uid_t ruid = -1, euid = -1;
+
+	ReadProcessStatus(pid, [&](String& line) {
+		if(line.TrimStart("Uid:")) {
+			if(auto v = Split(line, '\t'); v.GetCount() > 3) {
+				ruid = StrInt(v[0]);
+				euid = StrInt(v[1]);
+				return true;
+			}
+		}
+		return false;
+	});
+	
+	return { ruid, euid };
+}
+
+String GetRunningProcessName(APtyProcess& pty)
+{
+	pid_t pgid = GetProcessGroupId(pty);
+	if(pgid <= 0)
+		return Null;
+
+	String name;
+	ReadProcessStatus(pgid, [&](String& line) {
+		if(line.TrimStart("Name:")) {
+			name = line;
+			return true;
+		}
+		return false;
+	});
+
+	return name;
+}
+
+String GetUsernameFromUserId(uid_t uid)
+{
+	if(passwd *p = getpwuid(uid); p)
+		return String(p->pw_name);
+	return AsString(uid);
+}
+
+bool LinuxPtyProcess::IsRoot()
+{
+	if(pid_t pgid = GetProcessGroupId(*this); pgid > 0)
+		if(auto [r, e] = GetUserIdsFromProcess(pgid); e == 0) {
+			ruid = r;
+			euid = e;
+			return true;
+		}
+	return false;
+}
+
+bool LinuxPtyProcess::CheckPrivileges(Terminal& t)
+{
+	
+	if(bool b = IsRoot(); b && !isroot) {
+		isroot = true;
+		String txt = t_("Warning: Privilege escalation!");
+		txt << "&"
+			<< t_("Process") << ": " << Nvl(GetRunningProcessName(*this), t_("Unknown"))
+			<< ", ruid: "  << (int) ruid << " (" << GetUsernameFromUserId(ruid) << ")"
+			<< ", euid: " << (int) euid << " (" << GetUsernameFromUserId(euid) << ")";
+		notification = Warning(t, txt);
+		if(t.bell)
+			BeepExclamation();
+	}
+	else
+	if(isroot && !b) {
+		isroot = false;
+		GetNotificationDaemon().Remove(notification);
+	}
+	return isroot;
+}
+
+#endif
 
 }

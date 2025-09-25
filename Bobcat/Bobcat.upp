@@ -7,9 +7,9 @@ uses
 	CtrlLib,
 	Terminal,
 	PtyProcess,
-	StackCtrl,
 	plugin/pcre,
-	MessageCtrl;
+	MessageCtrl,
+	plugin/tif;
 
 uses(SDLGUI) VirtualGui/SDL2GL;
 
@@ -20,10 +20,10 @@ file
 	Bobcat.cpp,
 	main.cpp,
 	Utils.cpp,
-	Terminal readonly separator,
+	Profile readonly separator,
 	Terminal.h,
 	Terminal.cpp,
-	Profile readonly separator,
+	Terminal readonly separator,
 	Profile.h,
 	Profile.cpp,
 	Palette readonly separator,
@@ -41,6 +41,12 @@ file
 	QuickText readonly separator,
 	QuickText.h,
 	QuickText.cpp,
+	WebSearch readonly separator,
+	WebSearch.h,
+	WebSearch.cpp,
+	Stacker readonly separator,
+	Stacker.h,
+	Stacker.cpp,
 	Resources readonly separator,
 	Application.key,
 	Terminal.key,

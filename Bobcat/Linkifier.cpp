@@ -79,15 +79,14 @@ int Linkifier::GetCount() const
 	return links.GetCount();
 }
 
-LinkInfo& Linkifier::operator[](int i)
+const ItemInfo& Linkifier::operator[](int i)
 {
-	 ASSERT(i >= 0 && i < GetCount());
-	 return links[i];
+	return i >= 0 && i < links.GetCount() ? links[i] : Single<ItemInfo>();
 }
 
-const LinkInfo& Linkifier::GetCurrentLinkInfo() const
+const ItemInfo& Linkifier::GetCurrentItemInfo() const
 {
-	return links.Get(cursor, Single<LinkInfo>());
+	return cursor >= 0 && cursor < links.GetCount() ? links[cursor] : Single<ItemInfo>();
 }
 
 void Linkifier::Clear()
@@ -103,7 +102,7 @@ bool Linkifier::Sync()
 	if(!enabled || links.IsEmpty())
 		return false;
 	pos = term.GetMousePosAsIndex();
-	cursor = FindMatch(links, [this](const LinkInfo& q) {
+	cursor = FindMatch(links, [this](const ItemInfo& q) {
 		int i = term.GetPosAsIndex(q.pos, true);
 		return pos >= i && pos < i + q.length;
 	});
@@ -114,26 +113,6 @@ void Linkifier::Update()
 {
 	if(term.HasLinkifier())
 		Search();
-}
-
-const LinkInfo *Linkifier::begin() const
-{
-	 return links.begin();
-}
-
-LinkInfo *Linkifier::begin()
-{
-	 return links.begin();
-}
-
-const LinkInfo *Linkifier::end() const
-{
-	 return links.end();
-}
-
-LinkInfo *Linkifier::end()
-{
-	 return links.end();
 }
 
 void Linkifier::Search()
@@ -164,48 +143,34 @@ void Linkifier::Scan()
 			RegExp r(pi.pattern);
 			while(r.GlobalMatch(s)) {
 				int o = r.GetOffset();
-				LinkInfo& p = links.Add();
-				p.pos.y = offset;
-				p.pos.x = Utf32Len(~s, o);
+				ItemInfo p;
+				p.pos.y  = offset;
+				p.pos.x  = Utf32Len(~s, o);
 				p.length = Utf32Len(~s + o, r.GetLength());
-				p.url = s.Mid(o, r.GetLength());
+				p.data   = s.Mid(o, r.GetLength());
+				links.Add(pick(p));
 			}
 		}
 		return false;
 	};
 	term.GetPage().FetchRange(term.GetPageRange(), ScanRange);
 }
- 
-void Linkifier::OnHighlight(VectorMap<int, VTLine>& hl)
+
+void Linkifier::OnHighlight(HighlightInfo& hl)
 {
-	if(!term.HasLinkifier() || term.HasFinder() || !term.IsVisible() || links.IsEmpty())
+	if(!term.HasLinkifier() || term.HasFinder() || !term.IsVisible() || links.IsEmpty() || !hl.line)
 		return;
 
 	LTIMING("Linkifier::OnHighlight");
 
-	for(const LinkInfo& pt : links) {
-		for(int row = 0, col = 0; row < hl.GetCount(); row++) {
-			if(hl.GetKey(row) != pt.pos.y)
-				continue;
-			int offset = 0;
-			int ipos = term.GetPosAsIndex(pt.pos, true);
-			for(VTLine& l : hl)
-				for(VTCell& c : l) {
-					offset += c == 1; // Double width char, second half.
-					if(!c.IsHypertext() && pt.pos.x + offset <= col && col < pt.pos.x + pt.length + offset) { // First, check if the cell isn't already a hypertext.
-						if(pos >= ipos && pos < ipos + pt.length) {
-							c.Hyperlink();
-							c.data = 0;
-						}
-						else {
-							c.Hyperlink();
-							c.data = (dword) -1;
-						}
-					}
-					col++;
-				}
-		}
-	}
+	term.DoHighlight(links, hl, [this](HighlightInfo& hl) {
+		for(auto q : hl.highlighted)
+			if(!q->IsHypertext()) {
+			bool active = pos >= hl.posindex && pos < hl.posindex + hl.iteminfo->length;
+				q->Hyperlink().data = active ? 0 : (dword) -1;
+
+			}
+	});
 }
 
 Linkifier::Config::Config()
@@ -258,7 +223,7 @@ void LinkifierSetup::Drag()
 		list.RemoveSelection();
 }
 
-void LinkifierSetup::DnDInsert(int line, Upp::PasteClip& d)
+void LinkifierSetup::DnDInsert(int line, PasteClip& d)
 {
 	if(AcceptInternal<ArrayCtrl>(d, "linkifierpatternlist")) {
 		const ArrayCtrl& src = GetInternal<ArrayCtrl>(d);

@@ -18,6 +18,8 @@ using namespace FinderKeys;
 
 constexpr const int SEARCH_MAX = 256000;
 
+static StaticMutex sFinderLock;
+
 static void sWriteToDisplay(FrameLR<DisplayCtrl>& f, const String& txt)
 {
 	int cx = GetTextSize(txt, GetStdFont()).cx + 8;
@@ -29,6 +31,7 @@ Finder::Finder(Terminal& t)
 , index(0)
 , limit(SEARCH_MAX)
 , harvester(*this)
+, cancel(false)
 , searchtype(Search::CaseSensitive)
 {
 	CtrlLayout(*this);
@@ -43,7 +46,7 @@ Finder::Finder(Terminal& t)
 	end   << THISFN(End);
 	close << THISFN(Hide);
 	showall << THISFN(Sync);
-	Add(text.HSizePosZ(4, 200).TopPosZ(3, 18));
+	Add(text.HSizePosZ(4, 282).VSizePosZ(4, 4));
 	text.NullText(t_("Type to search..."));
 	text.AddFrame(display);
 	text.AddFrame(menu);
@@ -68,6 +71,7 @@ void Finder::SetConfig(const Profile& p)
 	SetSearchMode(p.finder.searchmode);
 	limit = clamp(p.finder.searchlimit, 1, SEARCH_MAX);
 	showall = p.finder.showall;
+	parallelize = p.finder.parallelize;
 	harvester.Format(p.finder.saveformat);
 	harvester.Delimiter(p.finder.delimiter);
 	harvester.Mode(p.finder.savemode);
@@ -231,6 +235,7 @@ void Finder::StdKeys(Bar& menu)
 	menu.AddKey(AK_HARVEST_CLIP, THISFN(SaveToClipboard));
 	menu.AddKey(AK_HARVEST_LIST, [this] { harvester.Mode("list"); });
 	menu.AddKey(AK_HARVEST_MAP,  [this] { harvester.Mode("map");  });
+	menu.AddKey(AK_PARALLELIZE,  [this] { parallelize = !parallelize; Sync(); });
 }
 
 bool Finder::Key(dword key, int count)
@@ -300,11 +305,27 @@ void Finder::SearchText(const WString& txt)
 
 void Finder::Search()
 {
-	if(term.IsSearching())
+	if(term.IsSearching()) {
+		CancelSearch();
 		return;
+	}
 	foundtext.Clear();
-	term.Find(~text, false, THISFN(OnSearch));
+	cancel = false;
+	if(~parallelize)
+		term.CoFind(~text, false, THISFN(OnSearch));
+	else
+		term.Find(~text, false, THISFN(OnSearch));
 	Sync();
+}
+
+void Finder::CancelSearch()
+{
+	cancel = true;
+}
+
+bool Finder::IsSearchCanceled() const
+{
+	return cancel;
 }
 
 void Finder::Update()
@@ -323,20 +344,6 @@ void Finder::SaveToClipboard()
 	harvester.SaveToClipboard();
 }
 
-int Finder::AdjustLineOffset(const Vector<int>& in, Vector<int>& out)
-{
-	int i = 0, dx = 0;
-	auto range = term.GetPageRange();
-	if(out = clone(in), i = out[0]; i == range.a) {
-		if(auto span = term.GetPage().GetLineSpan(i); i > span.a && i <= span.b) {
-			dx = GetLength(term.GetPage(), span.a, i);
-			for(int j = 0; j < out.GetCount(); j++)
-				out[j] = span.a + j;
-		}
-	}
-	return dx;
-}
-
 bool Finder::BasicSearch(const VectorMap<int, WString>& m, const WString& s)
 {
 	int slen = s.GetLength();
@@ -347,9 +354,11 @@ bool Finder::BasicSearch(const VectorMap<int, WString>& m, const WString& s)
 	// Notes: 1) We are using this for search, because it is faster than using WString::Find() here.
 	//        2) m.GetCount() > 1 == text is wrapped.
 	
-	auto ScanText = [&](Vector<TextAnchor>& v, int limit, bool tolower) {
+	auto ScanText = [&](SortedIndex<ItemInfo>& v, int limit, bool tolower) {
 		for(int row = 0, i = 0; row < m.GetCount(); row++) {
 			for(int col = 0; col < m[row].GetLength(); col++, i++) {
+				if(IsSearchCanceled())
+					return true;
 				int a = m[row][col], b = s[0];
 				if(tolower) {
 					a = ToLower(a);
@@ -377,10 +386,13 @@ bool Finder::BasicSearch(const VectorMap<int, WString>& m, const WString& s)
 					}
 					// If tlen is 0, then the substring is found.
 					if(!tlen) {
-						TextAnchor& a = v.Add();
-						a.pos.y = offset;
-						a.pos.x = i;
-						a.length = slen;
+						ItemInfo q;
+						q.pos.y = offset;
+						q.pos.x = i;
+						q.length = slen;
+						sFinderLock.Enter();
+						v.Add(q);
+						sFinderLock.Leave();
 						if(v.GetCount() == limit)
 							return true;
 					}
@@ -406,15 +418,20 @@ bool Finder::RegexSearch(const VectorMap<int, WString>& m, const WString& s)
 	if(q.IsEmpty())
 		return false;
 	
-	auto ScanText = [&](Vector<TextAnchor>& v, int limit) {
+	auto ScanText = [&](SortedIndex<ItemInfo>& v, int limit) {
 		RegExp r(s.ToString());
 		String ln = ToUtf8(q);
 		while(r.GlobalMatch(ln)) {
+			if(IsSearchCanceled())
+				return true;
+			ItemInfo a;
 			int o = r.GetOffset();
-			TextAnchor& a = v.Add();
 			a.pos.y = offset;
 			a.pos.x = Utf32Len(~ln, o);
 			a.length = Utf32Len(~ln + o, r.GetLength());
+			sFinderLock.Enter();
+			v.Add(a);
+			sFinderLock.Leave();
 			if(v.GetCount() == limit)
 				return true;
 		}
@@ -431,42 +448,30 @@ bool Finder::OnSearch(const VectorMap<int, WString>& m, const WString& s)
 	return IsRegex() ? RegexSearch(m, s) : BasicSearch(m, s);
 }
 
-void Finder::OnHighlight(VectorMap<int, VTLine>& hl)
+void Finder::OnHighlight(HighlightInfo& hl)
 {
 	if(!term.HasFinder() || term.IsSearching() || !foundtext.GetCount() || index < 0)
 		return;
 
-	TextAnchor p = foundtext[index];
-
 	LTIMING("Finder::OnHighlight");
 
-	Vector<int> rows;
-	int dx = AdjustLineOffset(hl.GetKeys(), rows);
-	
-	for(const TextAnchor& a : foundtext)
-		for(int row = 0, col = 0, offset = -dx; row < hl.GetCount(); row++) {
-			if(rows[row] != a.pos.y)
-				continue;
-			for(VTLine& l : hl) {
-				for(VTCell& c : l) {
-					offset += c == 1; // Double width char, second half.
-					if(a.pos.x + offset <= col && col < a.pos.x + offset + a.length) {
-						if(a.pos.y == p.pos.y && a.pos.x + offset == p.pos.x + offset) {
-							c.Normal();
-							c.Ink(term.highlight[1]);
-							c.Paper(term.highlight[3]);
-						}
-						else
-						if(~showall) {
-							c.Normal();
-							c.Ink(term.highlight[0]);
-							c.Paper(term.highlight[2]);
-						}
-					}
-					col++;
-				}
+	hl.adjusted = true;
+	term.DoHighlight(foundtext, hl, [&](HighlightInfo& hl) {
+		const ItemInfo& p = foundtext[index];
+		const ItemInfo* q = hl.iteminfo;
+		int   o = hl.offset;
+		for(auto cell : hl.highlighted) {
+			if(q->pos.y == p.pos.y && q->pos.x + o == p.pos.x + o) {
+				cell->Normal()
+					.Ink(term.highlight[1]).Paper(term.highlight[3]);
+			}
+			else
+			if(~showall) {
+				cell->Normal()
+					.Ink(term.highlight[0]).Paper(term.highlight[2]);
 			}
 		}
+	});
 }
 
 Finder::Harvester::Harvester(Finder& f)
@@ -509,7 +514,7 @@ bool Finder::Harvester::Reap(Stream& s)
 		if(txt.IsEmpty())
 			return false;
 		String reaped;
-		for(const TextAnchor& a : finder.foundtext) {
+		for(const ItemInfo& a : finder.foundtext) {
 			if(m.GetKey(0) != a.pos.y)
 				continue;
 			if((aborted = pi.StepCanceled()))
@@ -601,6 +606,7 @@ Finder::Config::Config()
 , savemode("map")
 , delimiter(",")
 , showall(false)
+, parallelize(false)
 {
 }
 
@@ -609,6 +615,7 @@ void Finder::Config::Jsonize(JsonIO& jio)
 	jio("SearchMode",        searchmode)
 	   ("SearchLimit",       searchlimit)
 	   ("ShowAll",           showall)
+	   ("ParallelSearch",    parallelize)
 	   ("HarvestingFormat",  saveformat)
 	   ("HarvestingMode",    savemode)
 	   ("Delimiter",         delimiter)
@@ -630,6 +637,7 @@ FinderSetup::FinderSetup()
 	savemode.SetIndex(0);
 	maxsearch <<= 65536;
 	showall = false;
+	parallelize = false;
 	list.InsertFrame(0, toolbar);
 	list.AddColumn(t_("Predefined search patterns")).Edit(edit);
 	list.WhenBar = THISFN(ContextMenu);
@@ -667,7 +675,7 @@ void FinderSetup::Drag()
 		list.RemoveSelection();
 }
 
-void FinderSetup::DnDInsert(int line, Upp::PasteClip& d)
+void FinderSetup::DnDInsert(int line, PasteClip& d)
 {
 	if(AcceptInternal<ArrayCtrl>(d, "finderpatternlist")) {
 		const ArrayCtrl& src = GetInternal<ArrayCtrl>(d);
@@ -685,12 +693,13 @@ void FinderSetup::DnDInsert(int line, Upp::PasteClip& d)
 void FinderSetup::Load(const Profile& p)
 {
 	list.Clear();
-	searchmode <<= p.finder.searchmode;
-	maxsearch  <<= p.finder.searchlimit;
-	showall    <<= p.finder.showall;
-	saveformat <<= p.finder.saveformat;
-	savemode   <<= p.finder.savemode;
-	delimiter  <<= p.finder.delimiter;
+	searchmode  <<= p.finder.searchmode;
+	maxsearch   <<= p.finder.searchlimit;
+	showall     <<= p.finder.showall;
+	saveformat  <<= p.finder.saveformat;
+	savemode    <<= p.finder.savemode;
+	delimiter   <<= p.finder.delimiter;
+	parallelize <<= p.finder.parallelize;
 	for(const String& s : p.finder.patterns)
 		list.Add(s);
 	list.SetCursor(0);
@@ -704,6 +713,7 @@ void FinderSetup::Store(Profile& p) const
 	p.finder.saveformat  = ~saveformat;
 	p.finder.savemode    = ~savemode;
 	p.finder.delimiter   = ~delimiter;
+	p.finder.parallelize = ~parallelize;
 	for(int i = 0; i < list.GetCount(); i++)
 		p.finder.patterns.Add(list.Get(i, 0));
 }

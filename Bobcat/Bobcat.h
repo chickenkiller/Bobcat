@@ -10,17 +10,15 @@
 #include <VirtualGui/SDL2GL/SDL2GL.h>
 #endif
 
+#include <plugin/tif/tif.h>
 #include <plugin/pcre/Pcre.h> // WebGui Windows compilation fix: This has to be above the other include files.
 
 #include <MessageCtrl/MessageCtrl.h>
-#include <StackCtrl/StackCtrl.h>
 #include <Terminal/Terminal.h>
 #include <PtyProcess/PtyProcess.h>
 
 #ifdef PLATFORM_POSIX
-#include <poll.h>
-template <>
-inline constexpr bool Upp::is_upp_guest<pollfd> = true;
+#include <pwd.h>
 #endif
 
 namespace Upp {
@@ -33,6 +31,11 @@ namespace Upp {
 #define KEYFILE <Bobcat/Application.key>
 #include <CtrlLib/key_header.h>
 
+#define KEYGROUPNAME TERMINALCTRL_KEYGROUPNAME
+#define KEYNAMESPACE TerminalCtrlKeys
+#define KEYFILE <Bobcat/Terminal.key>
+#include <CtrlLib/key_header.h>
+
 #define IMAGEFILE <Bobcat/Bobcat.iml>
 #define IMAGECLASS Images
 #include <Draw/iml_header.h>
@@ -41,6 +44,8 @@ namespace Upp {
 struct Bobcat;
 struct Terminal;
 struct Profile;
+struct ItemInfo;
+struct HighlightInfo;
 
 // Global context
 Ptr<Bobcat> GetContext();
@@ -51,6 +56,8 @@ void SetContext(Bobcat& ctx);
 #define LAYOUTFILE <Bobcat/Bobcat.lay>
 #include <CtrlCore/lay.h>
 
+#include "Stacker.h"
+#include "WebSearch.h"
 #include "QuickText.h"
 #include "Linkifier.h"
 #include "Finder.h"
@@ -61,9 +68,9 @@ void SetContext(Bobcat& ctx);
 struct Bobcat : Pte<Bobcat> {
     Bobcat();
 
-    bool        AddTerminal(const String& key = Null);
-    bool        AddTerminal(const Profile& profile);
-    bool        NewTerminalFromActiveProfile();
+    bool        AddTerminal(const String& key = Null, bool pane = false);
+    bool        AddTerminal(const Profile& profile, bool pane = false);
+    bool        NewTerminalFromActiveProfile(bool pane = false);
     void        RemoveTerminal(Terminal& t);
     void        ActivateTerminal();
     Terminal*   GetActiveTerminal();
@@ -107,6 +114,7 @@ struct Bobcat : Pte<Bobcat> {
     void        FileMenu(Bar& menu);
     void        EditMenu(Bar& menu);
     void        ViewMenu(Bar& menu);
+    void        EmulationMenu(Bar& menu);
     void        SetupMenu(Bar& menu);
     void        HelpMenu(Bar& menu);
     void        TermMenu(Bar& menu);
@@ -118,7 +126,6 @@ struct Bobcat : Pte<Bobcat> {
     void        About();
     void        Help();
 
-    void        Wait(int timeout);
     void        ProcessEvents();
     
     struct  Config {
@@ -144,6 +151,8 @@ struct Bobcat : Pte<Bobcat> {
         String      backgroundimagepath;
         String      backgroundimagemode;
         int         backgroundimageblur;
+        int         ptywaitinterval;
+        String      splitterorientation;
         void        Jsonize(JsonIO& jio);
     };
     
@@ -155,14 +164,37 @@ struct Bobcat : Pte<Bobcat> {
         Value       data;
         String      mode;
     };
-    
+
     TopWindow  window;
     MenuBar    menubar;
     Navigator  navigator;
     ViewCtrl   view;
-    StackCtrl  stack;
+    Stacker    stack;
     Config     settings;
     Array<Terminal> terminals;
+};
+
+// Generic terminal buffer item information. (For highlighting and other markers)
+
+struct ItemInfo : Moveable<ItemInfo> {
+    Point pos    = { 0, 0 };
+    int   length = 0;
+    Value data;
+    hash_t GetHashValue() const { return pos.y; }
+};
+
+inline bool operator==(const ItemInfo& a, const ItemInfo& b) { return a.pos.y == b.pos.y; };
+inline bool operator<(const ItemInfo& a, const ItemInfo& b)  { return a.pos.y < b.pos.y; };
+
+// Generic highlighting structure.
+
+struct HighlightInfo : Moveable<HighlightInfo> {
+    VectorMap<int, VTLine>* line = nullptr;
+    Vector<VTCell*> highlighted;
+    const ItemInfo* iteminfo;
+    int             posindex = 0;
+    int             offset   = 0;
+    bool            adjusted = false;
 };
 
 // Command line arguments/options parsing stuff
@@ -210,9 +242,16 @@ FileSel& BobcatFs();
 void LoadConfig(Bobcat& ctx);
 void SaveConfig(Bobcat& ctx);
 
+dword  GetModifierKey(String s);
+String GetModifierKeyDesc(dword keyflags);
+dword  GetAKModifierKey(const KeyInfo& k, int index = 0);
+
+String GetUpTime(Time t);
 String GetDefaultShell();
 String GetVersion();
 String GetBuildInfo();
+
+Size ParsePageSize(const String& s);
 
 const Display& StdBackgroundDisplay();
 const Display& NormalImageDisplay();
@@ -222,10 +261,14 @@ void LoadGuiTheme(Bobcat& ctx);
 void LoadGuiFont(Bobcat& ctx);
 Vector<Tuple<void (*)(), String, String>> GetAllGuiThemes();
 
+bool IsWaylandEnabled();
+void EnableWayland(bool b);
+
 MessageCtrl& GetNotificationDaemon();
 
-void AskYesNo(Ctrl& c, const String& text, const String& yes, const String& no,
+Ptr<MessageBox> AskYesNo(Ctrl& ctrl, const String& text, const String& yes, const String& no,
                             MessageBox::Type type, const Event<int>& action);
-
+Ptr<MessageBox> Warning(Ctrl& ctrl, const String& text, int timeout = 0);
+Ptr<MessageBox> Error(Ctrl& ctrl, const String& text, int timeout = 0);
 }
 #endif
